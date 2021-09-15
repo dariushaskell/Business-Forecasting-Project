@@ -1,0 +1,572 @@
+---
+output:
+  html_document: default 
+  pdf_document: default
+  always_allow_html: true
+---
+
+---
+title: "Business Forecasting with ARIMA and Multiple Regression Models"
+author: Darius Haskell
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: pdf_document
+---
+# Summary
+This project uses a dataset which contains meal order data from a fictional meal delivery company (MDC). The goal of this project is to develop forecasting models to predict meal orders in order to support the company's objective to increase revenue across its four cuisine offerings.  
+
+## Acknowledgements
+I do not own this data. The MealOrders.csv dataset comes from Analytics Vidhya & Genpact Hackathon (December 2018) and is publicly available on Kaggle. 
+
+## Business Interest and Objective
+Meal Delivery Company, (MDC), is meal delivery company that offers four different cuisine categories: Continental, Indian, Italian, and Thai. Although with some budget constraints, MDC wants to aggressively increase its revenue but also grow its customer base in all four different cuisine categories. The objective is to meet these interests while making budget planning more effective and efficient. Through this analysis of historical meal order data, we seek to develop a forecasting model to better predict budget requirements for the four cuisine categories.
+
+## Data
+
+```{r message=FALSE, warning=FALSE}
+
+library(readr)
+MealOrders <- read_csv("MealOrders.csv")
+nrow(MealOrders)
+head(MealOrders)
+
+library(sqldf)
+total<-sqldf("select distinct week as week, sum(num_orders) as total_orders from MealOrders group by week")
+head(total)
+nrow(total)
+
+Thai<-sqldf("select distinct week as week, sum(num_orders) as Thai_orders 
+                              from MealOrders where cuisine = 'Thai' group by week")
+head(Thai)
+nrow(Thai)
+
+Continental<-sqldf("select distinct week as week, sum(num_orders) as Continental_orders 
+                              from MealOrders where cuisine = 'Continental' group by week")
+head(Continental)
+nrow(Continental)
+
+Indian<-sqldf("select distinct week as week, sum(num_orders) as Indian_orders 
+                              from MealOrders where cuisine = 'Indian' group by week")
+head(Indian)
+nrow(Indian)
+
+Italian<-sqldf("select distinct week as week, sum(num_orders) as Italian_orders 
+                              from MealOrders where cuisine = 'Italian' group by week")
+head(Italian)
+nrow(Italian)
+
+# Percentage of different cuisines featured on the company's homepage (i.e., homepage_featured=1) 
+Thai_per_featured<-sqldf("select distinct week as week, 
+                       sum(homepage_featured)/count(homepage_featured) as Thai_per_featured 
+                              from MealOrders where cuisine = 'Thai' group by week")
+head(Thai_per_featured)
+
+Continental_per_featured<-sqldf("select distinct week as week, 
+                       sum(homepage_featured)/count(homepage_featured) as Continental_per_featured 
+                              from MealOrders where cuisine = 'Continental' group by week")
+head(Continental_per_featured)
+
+Indian_per_featured<-sqldf("select distinct week as week, 
+                       sum(homepage_featured)/count(homepage_featured) as Indian_per_featured 
+                              from MealOrders where cuisine = 'Indian' group by week")
+head(Indian_per_featured)
+
+Italian_per_featured<-sqldf("select distinct week as week, 
+                       sum(homepage_featured)/count(homepage_featured) as Italian_per_featured 
+                              from MealOrders where cuisine = 'Italian' group by week")
+head(Italian_per_featured)
+
+# merge the total weekly order datasets with the percentage of featured datasets
+df.list<-list(Thai, Continental, Indian, Italian,
+              Thai_per_featured, Continental_per_featured, Indian_per_featured,  
+              Italian_per_featured)
+
+total_featured<-total
+for (i in 1: length(df.list))
+{total_featured<-merge(total_featured, df.list[[i]], by="week")}
+head(total_featured)
+
+```
+The data was collected from MDC's transactional database of customer orders and compiled into the MealOrders.csv file. There were 456548 rows of customer order records. Each week contains multiple entries of orders for each of the different cuisines and a boolean value in the homepage_featured column to indicate whether or not the that cuisine was featured on the company's homepage (0: not featured, 1: featured). We then wrangled the data by compiling total orders in each cuisine per week along with total orders for the individual cuisines for each week. This revealed that there are a total of 145 weeks of order data. We then calculated the "per_featured" percentage of different cuisines featured on the company's homepage by week for each cuisine. Finally, we aggregated all this data into one dataset.
+
+# Data Analysis
+
+## The problem to solve
+
+Since the interest of MDC is to aggressively increase its revenue but also grow its customer base in all four different cuisine categories, with some budgetary constraints and the objective is to meet these interests while making budget planning more effective and efficient, we will develop a forecasting model based on the the past 145 weeks of meal orders and per_featured data to predict the total orders for all cuisines for the next week (week 146). We will construct these forecasting models in such a way as to assess a high level of customer orders in each of the cuisines such that the probability of customer demand exceeding the level is small. This way we can ensure that customer demand is unlikely to exceed our predicted number of orders. 
+
+## Data exploration 
+#install.packages("TSstudio")
+```{r message=FALSE, warning=FALSE}
+library(TSstudio)
+total.ts<-ts(total$total_orders, frequency=12)
+Thai.ts<-ts(Thai$Thai_orders, frequency=12)
+Continental.ts<-ts(Continental$Continental_orders, frequency=12)
+Indian.ts<-ts(Indian$Indian_orders, frequency=12)
+Italian.ts<-ts(Italian$Italian_orders, frequency=12)
+
+ts_decompose(total.ts)
+ts_seasonal(total.ts)
+ts_cor(total.ts)
+
+ts_decompose(Thai.ts)
+ts_seasonal(Thai.ts)
+ts_cor(Thai.ts)
+
+ts_decompose(Continental.ts)
+ts_seasonal(Continental.ts)
+ts_cor(Continental.ts)
+
+ts_decompose(Indian.ts)
+ts_seasonal(Indian.ts)
+ts_cor(Indian.ts)
+
+ts_decompose(Italian.ts)
+ts_seasonal(Italian.ts)
+ts_cor(Italian.ts)
+
+```
+
+The plots above show that most of the data sets for total orders and for the individual cuisines show a very low degree of seasonality and that the random noise seems to follow the Normal distribution. Additionally, the long term trends are not substantial, with Total orders running flat, Thai slightly decreasing, Continental running flat, Indian decreasing slightly, and Italian increasing. 
+
+
+## Forecasting model options
+```{r message=FALSE, warning=FALSE}
+#install.packages(c("TTR", "zoo", "dplyr", "sqldf", "TSstudio", "ggplot2", "hrbrthemes", "forecast"))
+library(TTR)
+library(zoo)
+library(dplyr)
+library(sqldf)
+library(TSstudio)
+library(ggplot2)
+library(hrbrthemes) 
+library(forecast)
+```
+
+**Thai cuisine order trend projection**
+```{r message=FALSE, warning=FALSE}
+total_Thai<-sqldf('select week as week, total_orders as total_orders, Thai_orders as Thai_orders, Thai_per_featured as per_featured from total_featured')
+head(total_Thai)
+
+# Simple Regression Model
+total_Thai$total_orderslag1<-lag(total_Thai$total_orders,1)
+total_Thai.SLR<-na.omit(total_Thai)
+
+Thai_SLR<-lm(Thai_orders~total_orderslag1, data=total_Thai.SLR)
+newdata1<-data.frame(total_orderslag1=total_Thai$total_orders[145]) 
+predict(Thai_SLR, newdata = newdata1, interval = "confidence", level=0.95)
+
+# Multiple Regression Model 1
+total_Thai$total_orderslag2<-lag(total_Thai$total_orders,2)
+total_Thai.MLR1<-na.omit(total_Thai)
+Thai_MLR1<-lm(Thai_orders~total_orderslag1+total_orderslag2, data=total_Thai.MLR1)
+newdata2<-data.frame(total_orderslag1=total_Thai$total_orders[145], 
+                    total_orderslag2=total_Thai$total_orders[144]) 
+predict(Thai_MLR1, newdata = newdata2, interval = "confidence", level=0.95)
+
+# Multiple Regression Model 2
+total_Thai$total_orderslag3<-lag(total_Thai$total_orders,3)
+total_Thai.MLR2<-na.omit(total_Thai)
+Thai_MLR2<-lm(Thai_orders~total_orderslag1+total_orderslag2+total_orderslag3, data=total_Thai.MLR2)
+newdata3<-data.frame(total_orderslag1=total_Thai$total_orders[145], 
+                    total_orderslag2=total_Thai$total_orders[144], 
+                    total_orderslag3=total_Thai$total_orders[143]) 
+predict(Thai_MLR2, newdata = newdata3, interval = "confidence", level=0.95)
+
+# Multiple Regression Model 3
+Thai_featured<-sqldf("select distinct week as week, sum(num_orders) as Thai_orders,
+                       sum(homepage_featured)/count(homepage_featured) as per_featured 
+                              from MealOrders where cuisine = 'Thai' group by week")
+total_Thai<-merge(total, Thai_featured, by="week")
+total_Thai$per_featuredlag1<-lag(total_Thai$per_featured,1)
+total_Thai$total_orderslag1<-lag(total_Thai$total_orders,1)
+total_Thai.MLR3<-na.omit(total_Thai)
+Thai_MLR3<-lm(Thai_orders~total_orderslag1+per_featuredlag1, data=total_Thai.MLR3)
+newdata4<-data.frame(total_orderslag1=total_Thai$total_orders[145], 
+                    per_featuredlag1=total_Thai$per_featured[145]) 
+Thai.trend.forecast<-predict(Thai_MLR3, newdata = newdata4, interval = "confidence", level=0.90)
+Thai.trend.forecast<-data.frame(Thai.trend.forecast)
+#Create residuals for AR(1) Model, create AR(1) residual forecast
+total_Thai.MLR3$Residual<-total_Thai.MLR3$Thai_orders-Thai_MLR3$fitted.values
+Residual.ts<-ts(total_Thai.MLR3$Residual)
+Thai.AR.model <- Arima(Residual.ts, order = c(1,0, 0))
+Thai.residual.forecast<- forecast(Thai.AR.model, h = 1, level=c(90))
+```
+
+**Continental cuisine order trend projection**
+```{r message=FALSE, warning=FALSE}
+total_Continental<-sqldf('select week as week, total_orders as total_orders, Continental_orders as Continental_orders, Continental_per_featured as per_featured from total_featured')
+head(total_Continental)
+
+# Simple Regression Model
+total_Continental$total_orderslag1<-lag(total_Continental$total_orders,1)
+total_Continental.SLR<-na.omit(total_Continental)
+
+Continental_SLR<-lm(Continental_orders~total_orderslag1, data=total_Continental.SLR)
+newdata1<-data.frame(total_orderslag1=total_Continental$total_orders[145]) 
+predict(Continental_SLR, newdata = newdata1, interval = "confidence", level=0.95)
+
+# Multiple Regression Model 1
+total_Continental$total_orderslag2<-lag(total_Continental$total_orders,2)
+total_Continental.MLR1<-na.omit(total_Continental)
+Continental_MLR1<-lm(Continental_orders~total_orderslag1+total_orderslag2, data=total_Continental.MLR1)
+newdata2<-data.frame(total_orderslag1=total_Continental$total_orders[145], 
+                    total_orderslag2=total_Continental$total_orders[144]) 
+predict(Continental_MLR1, newdata = newdata2, interval = "confidence", level=0.95)
+
+# Multiple Regression Model 2
+total_Continental$total_orderslag3<-lag(total_Continental$total_orders,3)
+total_Continental.MLR2<-na.omit(total_Continental)
+Continental_MLR2<-lm(Continental_orders~total_orderslag1+total_orderslag2+total_orderslag3, data=total_Continental.MLR2)
+newdata3<-data.frame(total_orderslag1=total_Continental$total_orders[145], 
+                    total_orderslag2=total_Continental$total_orders[144], 
+                    total_orderslag3=total_Continental$total_orders[143]) 
+predict(Continental_MLR2, newdata = newdata3, interval = "confidence", level=0.95)
+
+# Multiple Regression Model 3
+Continental_featured<-sqldf("select distinct week as week, sum(num_orders) as Continental_orders,
+                       sum(homepage_featured)/count(homepage_featured) as per_featured 
+                              from MealOrders where cuisine = 'Continental' group by week")
+total_Continental<-merge(total, Continental_featured, by="week")
+total_Continental$per_featuredlag1<-lag(total_Continental$per_featured,1)
+total_Continental$total_orderslag1<-lag(total_Continental$total_orders,1)
+total_Continental.MLR3<-na.omit(total_Continental)
+Continental_MLR3<-lm(Continental_orders~total_orderslag1+per_featuredlag1, data=total_Continental.MLR3)
+newdata4<-data.frame(total_orderslag1=total_Continental$total_orders[145], 
+                    per_featuredlag1=total_Continental$per_featured[145]) 
+Continental.trend.forecast<-predict(Continental_MLR3, newdata = newdata4, interval = "confidence", level=0.90)
+Continental.trend.forecast<-data.frame(Continental.trend.forecast)
+#Create residuals for AR(1) Model, create AR(1) residual forecast
+total_Continental.MLR3$Residual<-total_Continental.MLR3$Continental_orders-Continental_MLR3$fitted.values
+Residual.ts<-ts(total_Continental.MLR3$Residual)
+Continental.AR.model <- Arima(Residual.ts, order = c(1,0, 0))
+Continental.residual.forecast<- forecast(Continental.AR.model, h = 1, level=c(90))
+```
+
+**Indian cuisine order trend projection**
+```{r message=FALSE, warning=FALSE}
+total_Indian<-sqldf('select week as week, total_orders as total_orders, Indian_orders as Indian_orders, Indian_per_featured as per_featured from total_featured')
+head(total_Indian)
+
+# Simple Regression Model
+total_Indian$total_orderslag1<-lag(total_Indian$total_orders,1)
+total_Indian.SLR<-na.omit(total_Indian)
+
+Indian_SLR<-lm(Indian_orders~total_orderslag1, data=total_Indian.SLR)
+newdata1<-data.frame(total_orderslag1=total_Indian$total_orders[145]) 
+predict(Indian_SLR, newdata = newdata1, interval = "confidence", level=0.95)
+
+# Multiple Regression Model 1
+total_Indian$total_orderslag2<-lag(total_Indian$total_orders,2)
+total_Indian.MLR1<-na.omit(total_Indian)
+Indian_MLR1<-lm(Indian_orders~total_orderslag1+total_orderslag2, data=total_Indian.MLR1)
+newdata2<-data.frame(total_orderslag1=total_Indian$total_orders[145], 
+                    total_orderslag2=total_Indian$total_orders[144]) 
+predict(Indian_MLR1, newdata = newdata2, interval = "confidence", level=0.95)
+
+# Multiple Regression Model 2
+total_Indian$total_orderslag3<-lag(total_Indian$total_orders,3)
+total_Indian.MLR2<-na.omit(total_Indian)
+Indian_MLR2<-lm(Indian_orders~total_orderslag1+total_orderslag2+total_orderslag3, data=total_Indian.MLR2)
+newdata3<-data.frame(total_orderslag1=total_Indian$total_orders[145], 
+                    total_orderslag2=total_Indian$total_orders[144], 
+                    total_orderslag3=total_Indian$total_orders[143]) 
+predict(Indian_MLR2, newdata = newdata3, interval = "confidence", level=0.95)
+
+# Multiple Regression Model 3
+Indian_featured<-sqldf("select distinct week as week, sum(num_orders) as Indian_orders,
+                       sum(homepage_featured)/count(homepage_featured) as per_featured 
+                              from MealOrders where cuisine = 'Indian' group by week")
+total_Indian<-merge(total, Indian_featured, by="week")
+total_Indian$per_featuredlag1<-lag(total_Indian$per_featured,1)
+total_Indian$total_orderslag1<-lag(total_Indian$total_orders,1)
+total_Indian.MLR3<-na.omit(total_Indian)
+Indian_MLR3<-lm(Indian_orders~total_orderslag1+per_featuredlag1, data=total_Indian.MLR3)
+newdata4<-data.frame(total_orderslag1=total_Indian$total_orders[145], 
+                    per_featuredlag1=total_Indian$per_featured[145]) 
+Indian.trend.forecast<-predict(Indian_MLR3, newdata = newdata4, interval = "confidence", level=0.90)
+Indian.trend.forecast<-data.frame(Indian.trend.forecast)
+#Create residuals for AR(1) Model, create AR(1) residual forecast
+total_Indian.MLR3$Residual<-total_Indian.MLR3$Indian_orders-Indian_MLR3$fitted.values
+Residual.ts<-ts(total_Indian.MLR3$Residual)
+Indian.AR.model <- Arima(Residual.ts, order = c(1,0, 0))
+Indian.residual.forecast<- forecast(Indian.AR.model, h = 1, level=c(90))
+```
+
+**Italian cuisine order trend projection**
+```{r message=FALSE, warning=FALSE}
+total_Italian<-sqldf('select week as week, total_orders as total_orders, Italian_orders as Italian_orders, Italian_per_featured as per_featured from total_featured')
+head(total_Italian)
+
+# Simple Regression Model
+total_Italian$total_orderslag1<-lag(total_Italian$total_orders,1)
+total_Italian.SLR<-na.omit(total_Italian)
+
+Italian_SLR<-lm(Italian_orders~total_orderslag1, data=total_Italian.SLR)
+newdata1<-data.frame(total_orderslag1=total_Italian$total_orders[145]) 
+predict(Italian_SLR, newdata = newdata1, interval = "confidence", level=0.95)
+
+# Multiple Regression Model 1
+total_Italian$total_orderslag2<-lag(total_Italian$total_orders,2)
+total_Italian.MLR1<-na.omit(total_Italian)
+Italian_MLR1<-lm(Italian_orders~total_orderslag1+total_orderslag2, data=total_Italian.MLR1)
+newdata2<-data.frame(total_orderslag1=total_Italian$total_orders[145], 
+                    total_orderslag2=total_Italian$total_orders[144]) 
+predict(Italian_MLR1, newdata = newdata2, interval = "confidence", level=0.95)
+
+# Multiple Regression Model 2
+total_Italian$total_orderslag3<-lag(total_Italian$total_orders,3)
+total_Italian.MLR2<-na.omit(total_Italian)
+Italian_MLR2<-lm(Italian_orders~total_orderslag1+total_orderslag2+total_orderslag3, data=total_Italian.MLR2)
+newdata3<-data.frame(total_orderslag1=total_Italian$total_orders[145], 
+                    total_orderslag2=total_Italian$total_orders[144], 
+                    total_orderslag3=total_Italian$total_orders[143]) 
+predict(Italian_MLR2, newdata = newdata3, interval = "confidence", level=0.95)
+
+# Multiple Regression Model 3
+Italian_featured<-sqldf("select distinct week as week, sum(num_orders) as Italian_orders,
+                       sum(homepage_featured)/count(homepage_featured) as per_featured 
+                              from MealOrders where cuisine = 'Italian' group by week")
+total_Italian<-merge(total, Italian_featured, by="week")
+total_Italian$per_featuredlag1<-lag(total_Italian$per_featured,1)
+total_Italian$total_orderslag1<-lag(total_Italian$total_orders,1)
+total_Italian.MLR3<-na.omit(total_Italian)
+Italian_MLR3<-lm(Italian_orders~total_orderslag1+per_featuredlag1, data=total_Italian.MLR3)
+newdata4<-data.frame(total_orderslag1=total_Italian$total_orders[145], 
+                    per_featuredlag1=total_Italian$per_featured[145]) 
+Italian.trend.forecast<-predict(Italian_MLR3, newdata = newdata4, interval = "confidence", level=0.90)
+Italian.trend.forecast<-data.frame(Italian.trend.forecast)
+#Create residuals for AR(1) Model, create AR(1) residual forecast
+total_Italian.MLR3$Residual<-total_Italian.MLR3$Italian_orders-Italian_MLR3$fitted.values
+Residual.ts<-ts(total_Italian.MLR3$Residual)
+Italian.AR.model <- Arima(Residual.ts, order = c(1,0, 0))
+Italian.residual.forecast<- forecast(Italian.AR.model, h = 1, level=c(90))
+```
+
+
+**Total order ARIMA candidate models**
+```{r message=FALSE, warning=FALSE}
+total_orders.ts<-ts(total_featured$total_orders)
+auto.arima(total_orders.ts[1:100], trace=TRUE, stationary = FALSE, seasonal = FALSE, ic = c("bic"))
+```
+
+**Thai cuisine order ARIMA candidate models**
+```{r message=FALSE, warning=FALSE}
+Thai_orders.ts<-ts(total_featured$Thai_orders)
+auto.arima(Thai_orders.ts[1:100], trace=TRUE, stationary = FALSE, seasonal = FALSE, ic = c("bic"))
+```
+
+**Continental cuisine order ARIMA candidate models**
+```{r message=FALSE, warning=FALSE}
+Continental_orders.ts<-ts(total_featured$Continental_orders)
+auto.arima(Continental_orders.ts[1:100], trace=TRUE, stationary = FALSE, seasonal = FALSE, ic = c("bic"))
+```
+
+**Indian cuisine order ARIMA candidate models**
+```{r message=FALSE, warning=FALSE}
+Indian_orders.ts<-ts(total_featured$Indian_orders)
+auto.arima(Indian_orders.ts[1:100], trace=TRUE, stationary = FALSE, seasonal = FALSE, ic = c("bic"))
+```
+
+**Italian cuisine order ARIMA candidate models**
+```{r message=FALSE, warning=FALSE}
+Italian_orders.ts<-ts(total_featured$Italian_orders)
+auto.arima(Italian_orders.ts[1:100], trace=TRUE, stationary = FALSE, seasonal = FALSE, ic = c("bic"))
+```
+
+
+
+## Model performance comparison 
+
+
+**Thai cuisine order trend projection model Adjusted-Rsq values**
+```{r message=FALSE, warning=FALSE}
+summary(Thai_SLR)$adj.r.squared
+summary(Thai_MLR1)$adj.r.squared
+summary(Thai_MLR2)$adj.r.squared
+summary(Thai_MLR3)$adj.r.squared
+
+```
+
+**Continental cuisine order trend projection model Adjusted-Rsq values**
+```{r message=FALSE, warning=FALSE}
+summary(Continental_SLR)$adj.r.squared
+summary(Continental_MLR1)$adj.r.squared
+summary(Continental_MLR2)$adj.r.squared
+summary(Continental_MLR3)$adj.r.squared
+```
+
+**Indian cuisine order trend projection model Adjusted-Rsq values**
+```{r message=FALSE, warning=FALSE}
+summary(Indian_SLR)$adj.r.squared
+summary(Indian_MLR1)$adj.r.squared
+summary(Indian_MLR2)$adj.r.squared
+summary(Indian_MLR3)$adj.r.squared
+```
+
+**Italian cuisine order trend projection model Adjusted-Rsq values**
+```{r message=FALSE, warning=FALSE}
+summary(Italian_SLR)$adj.r.squared
+summary(Italian_MLR1)$adj.r.squared
+summary(Italian_MLR2)$adj.r.squared
+summary(Italian_MLR3)$adj.r.squared
+```
+
+From the Adjusted-rsq it is clear to see that MLR3 model, which uses the 1-lagged total orders and the 1-lagged per_featured data column as predictors, is the best model for trend projection. This is because the Adjusted-rsq value is the highest for the MLR3 model which means the MLR3 model explains the most variance in the trend of the cuisines as compared with the other models.
+
+
+**Total order ARIMA candidate model MAPE**
+```{r message=FALSE, warning=FALSE}
+fit.candidate1 <- Arima(total_orders.ts[1:100], order = c(0, 0, 1))
+fit.candidate2 <- Arima(total_orders.ts[1:100], order = c(1, 0, 0))
+fit.candidate3 <- Arima(total_orders.ts[1:100], order = c(0, 0, 0))
+validation.candidate1  <- Arima(total_orders.ts[101:145], model=fit.candidate1)
+validation.candidate2  <- Arima(total_orders.ts[101:145], model=fit.candidate2)
+validation.candidate3  <- Arima(total_orders.ts[101:145], model=fit.candidate3)
+accuracy(validation.candidate1)
+accuracy(validation.candidate2)
+accuracy(validation.candidate3)
+```
+
+**Thai cuisine order ARIMA candidate model MAPE**
+```{r message=FALSE, warning=FALSE}
+fit.candidate1 <- Arima(Thai_orders.ts[1:100], order = c(1, 0, 1))
+fit.candidate2 <- Arima(Thai_orders.ts[1:100], order = c(2, 0, 0))
+fit.candidate3 <- Arima(Thai_orders.ts[1:100], order = c(1, 0, 0))
+validation.candidate1  <- Arima(Thai_orders.ts[101:145], model=fit.candidate1)
+validation.candidate2  <- Arima(Thai_orders.ts[101:145], model=fit.candidate2)
+validation.candidate3  <- Arima(Thai_orders.ts[101:145], model=fit.candidate3)
+accuracy(validation.candidate1)
+accuracy(validation.candidate2) 
+accuracy(validation.candidate3)
+
+```
+
+**Continental cuisine order ARIMA candidate model MAPE**
+```{r message=FALSE, warning=FALSE}
+fit.candidate1 <- Arima(Continental_orders.ts[1:100], order = c(0, 0, 1))
+fit.candidate2 <- Arima(Continental_orders.ts[1:100], order = c(1, 0, 0))
+fit.candidate3 <- Arima(Continental_orders.ts[1:100], order = c(1, 0, 1))
+validation.candidate1  <- Arima(Continental_orders.ts[101:145], model=fit.candidate1)
+validation.candidate2  <- Arima(Continental_orders.ts[101:145], model=fit.candidate2)
+validation.candidate3  <- Arima(Continental_orders.ts[101:145], model=fit.candidate3)
+accuracy(validation.candidate1)
+accuracy(validation.candidate2) 
+accuracy(validation.candidate3)
+```
+
+**Indian cuisine order ARIMA candidate model MAPE**
+```{r message=FALSE, warning=FALSE}
+fit.candidate1 <- Arima(Indian_orders.ts[1:100], order = c(1, 0, 0))
+fit.candidate2 <- Arima(Indian_orders.ts[1:100], order = c(0, 0, 1))
+fit.candidate3 <- Arima(Indian_orders.ts[1:100], order = c(2, 0, 0))
+validation.candidate1  <- Arima(Indian_orders.ts[101:145], model=fit.candidate1)
+validation.candidate2  <- Arima(Indian_orders.ts[101:145], model=fit.candidate2)
+validation.candidate3  <- Arima(Indian_orders.ts[101:145], model=fit.candidate3)
+accuracy(validation.candidate1)
+accuracy(validation.candidate2) 
+accuracy(validation.candidate3) 
+```
+
+**Italian cuisine order ARIMA candidate model MAPE**
+```{r message=FALSE, warning=FALSE}
+fit.candidate1 <- Arima(Italian_orders.ts[1:100], order = c(0, 1, 2))
+fit.candidate2 <- Arima(Italian_orders.ts[1:100], order = c(0, 1, 1))
+fit.candidate3 <- Arima(Italian_orders.ts[1:100], order = c(1, 1, 1))
+validation.candidate1  <- Arima(Italian_orders.ts[101:145], model=fit.candidate1)
+validation.candidate2  <- Arima(Italian_orders.ts[101:145], model=fit.candidate2)
+validation.candidate3  <- Arima(Italian_orders.ts[101:145], model=fit.candidate3)
+accuracy(validation.candidate1)
+accuracy(validation.candidate2) 
+accuracy(validation.candidate3) 
+```
+
+Based on choosing the ARIMA models with the three lowest BIC values and calculating the MAPE values for the ARIMA models, the best model for Total Orders is ARIMA(0,0,1), Thai is ARIMA(1,0,1), Continental is ARIMA(0,0,1), Indian is ARIMA(1,0,0), and Italian is ARIMA (0,1,2).
+
+## Data forecasting
+
+**Forecast for total order of all cuisines for next week**
+```{r message=FALSE, warning=FALSE}
+Total.fit.best<-Arima(total_orders.ts[1:145], order = c(0, 0, 1))
+total_orders.nextweek<- forecast(Total.fit.best, h = 1, level=c(90))
+as.numeric(total_orders.nextweek$upper)
+plot(total_orders.nextweek)
+```
+
+**Forecast for Thai cuisine order for next week**
+```{r message=FALSE, warning=FALSE}
+#Upper bound of the 90% range forecast for MLR3+AR(1) model
+Thai.trend.forecast$upr + as.numeric(Thai.residual.forecast$upper)
+
+#Upper bound of the 90% range forecast for ARIMA(1,0,1) model
+library(ggplot2)
+Thai.fit.best<-Arima(Thai_orders.ts[1:145], order = c(1, 0, 1))
+Thai_orders.nextweek<- forecast(Thai.fit.best, h = 1, level=c(90))
+as.numeric(Thai_orders.nextweek$upper)
+plot(Thai_orders.nextweek)
+```
+
+**Forecast for Continental cuisine order for next week**
+```{r message=FALSE, warning=FALSE}
+#Upper bound of the 90% range forecast for MLR3+AR(1) model
+Continental.trend.forecast$upr + as.numeric(Continental.residual.forecast$upper)
+
+#Upper bound of the 90% range forecast for ARIMA(0,0,1) model
+Continental.fit.best<-Arima(Continental_orders.ts[1:145], order = c(0, 0, 1))
+Continental_orders.nextweek<- forecast(Continental.fit.best, h = 1, level=c(90))
+as.numeric(Continental_orders.nextweek$upper)
+plot(Continental_orders.nextweek)
+```
+
+**Forecast for Indian cuisine order for next week**
+```{r message=FALSE, warning=FALSE}
+#Upper bound of the 90% range forecast for MLR3+AR(1) model
+Indian.trend.forecast$upr + as.numeric(Indian.residual.forecast$upper)
+
+#Upper bound of the 90% range forecast for ARIMA(1,0,0) model
+Indian.fit.best<-Arima(Indian_orders.ts[1:145], order = c(1, 0, 0))
+Indian_orders.nextweek<- forecast(Indian.fit.best, h = 1, level=c(90))
+as.numeric(Indian_orders.nextweek$upper)
+plot(Indian_orders.nextweek)
+```
+
+**Forecast for Italian cuisine order for next week**
+```{r message=FALSE, warning=FALSE}
+#Upper bound of the 90% range forecast for MLR3+AR(1) model
+Italian.trend.forecast$upr + as.numeric(Italian.residual.forecast$upper)
+
+#Upper bound of the 90% range forecast for ARIMA(0,1,2) model
+Italian.fit.best<-Arima(Italian_orders.ts[1:145], order = c(0, 1, 2))
+Italian_orders.nextweek<- forecast(Italian.fit.best, h = 1, level=c(90))
+as.numeric(Italian_orders.nextweek$upper)
+plot(Italian_orders.nextweek)
+```
+
+
+# Discussion and Recommendation 
+
+Given all the preceding analysis we have determined two possible models to forecast next week's cuisine orders. We can use either the MLR3+AR(1) or the corresponding best ARIMA model chosen with the BIC-MAPE method. Both sets of projections are fairly close to one another, so we will use the preceding short term trend in the meal order data to choose between the MLR3+AR(1) and the ARIMA models. If the short term trend appears to be increasing or flat, we will choose the greater of the two projections, and if the trend is decreasing, we will choose the lesser of the two projections.
+
+Upper bound of the 90% range forecast for Total Orders based on ARIMA(0,0,1):
+980542.7
+
+Short term trend of Thai: relatively flat -> MLR3+AR(1) model
+Short term trend of Continental: decreasing -> MLR3+AR(1) model
+Short term trend of Indian: decreasing -> ARIMA(1,0,0) model
+Short term trend of Italian: decreasing -> ARIMA(0,1,2) model
+
+Upper bound of the 90% range forecast for Thai Orders based on MLR3+AR(1) model:
+241858.4
+Upper bound of the 90% range forecast for Continental Orders based on MLR3+AR(1) model:
+158414.1
+Upper bound of the 90% range forecast for Indian Orders based on ARIMA(1,0,0):
+271616.6
+Upper bound of the 90% range forecast for Total Orders based on ARIMA(0,1,2):
+434897
+
+Total of individual cuisine order projections: 1106786.1
+
+Difference between total order projection and sum of individual cuisine order projections: 126243.4
+
+Cuisine prices per order: Thai-186.37, Continental-549.59, Indian-327.45, Italian-272.84
+
+Expected total revenue based on upper bound of the 90% range forecast: (241858.4 x 186.37)+(158414.1 x 549.59)+(271616.6 x 327.45)+(434897 x 272.84) = 339736108.5 monetary units
